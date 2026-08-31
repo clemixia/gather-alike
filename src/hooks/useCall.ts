@@ -11,6 +11,10 @@ interface UseCallOptions {
   partnerOnline: boolean;
   near: boolean;
   proximityEnabled: boolean;
+  preferredMicEnabled: boolean;
+  preferredCameraEnabled: boolean;
+  onMicPreferenceChange: (enabled: boolean) => void;
+  onCameraPreferenceChange: (enabled: boolean) => void;
 }
 
 function getMediaErrorMessage(error: unknown): string {
@@ -50,6 +54,10 @@ export function useCall({
   partnerOnline,
   near,
   proximityEnabled,
+  preferredMicEnabled,
+  preferredCameraEnabled,
+  onMicPreferenceChange,
+  onCameraPreferenceChange,
 }: UseCallOptions) {
   const supported =
     typeof window !== 'undefined' &&
@@ -59,8 +67,8 @@ export function useCall({
   const [callState, setCallState] = useState<CallState>('idle');
   const [localStream, setLocalStream] = useState<MediaStream | null>(null);
   const [remoteStream, setRemoteStream] = useState<MediaStream | null>(null);
-  const [micEnabled, setMicEnabled] = useState(true);
-  const [cameraEnabled, setCameraEnabled] = useState(false);
+  const [micEnabled, setMicEnabled] = useState(preferredMicEnabled);
+  const [cameraEnabled, setCameraEnabled] = useState(preferredCameraEnabled);
   const [error, setError] = useState<string | null>(null);
 
   const callStateRef = useRef<CallState>(callState);
@@ -68,6 +76,12 @@ export function useCall({
   const partnerOnlineRef = useRef(partnerOnline);
   const proximityEnabledRef = useRef(proximityEnabled);
   const supportedRef = useRef(supported);
+
+  const preferredMicEnabledRef = useRef(preferredMicEnabled);
+  const preferredCameraEnabledRef = useRef(preferredCameraEnabled);
+
+  const onMicPreferenceChangeRef = useRef(onMicPreferenceChange);
+  const onCameraPreferenceChangeRef = useRef(onCameraPreferenceChange);
 
   const manualEndedRef = useRef(false);
   const startingRef = useRef(false);
@@ -100,6 +114,30 @@ export function useCall({
   useEffect(() => {
     supportedRef.current = supported;
   }, [supported]);
+
+  useEffect(() => {
+    preferredMicEnabledRef.current = preferredMicEnabled;
+
+    if (callStateRef.current === 'idle') {
+      setMicEnabled(preferredMicEnabled);
+    }
+  }, [preferredMicEnabled]);
+
+  useEffect(() => {
+    preferredCameraEnabledRef.current = preferredCameraEnabled;
+
+    if (callStateRef.current === 'idle') {
+      setCameraEnabled(preferredCameraEnabled);
+    }
+  }, [preferredCameraEnabled]);
+
+  useEffect(() => {
+    onMicPreferenceChangeRef.current = onMicPreferenceChange;
+  }, [onMicPreferenceChange]);
+
+  useEffect(() => {
+    onCameraPreferenceChangeRef.current = onCameraPreferenceChange;
+  }, [onCameraPreferenceChange]);
 
   const sendSignal = useCallback(
     (message: SignalMessage) => {
@@ -157,6 +195,12 @@ export function useCall({
     };
   }, [coupleId, userId]);
 
+  const refreshLocalStream = useCallback(() => {
+    if (localStreamRef.current) {
+      setLocalStream(new MediaStream(localStreamRef.current.getTracks()));
+    }
+  }, []);
+
   const cleanupCall = useCallback(() => {
     peerRef.current?.close();
     peerRef.current = null;
@@ -168,8 +212,11 @@ export function useCall({
 
     setLocalStream(null);
     setRemoteStream(null);
-    setMicEnabled(true);
-    setCameraEnabled(false);
+
+    // Restore UI state to saved preferences.
+    setMicEnabled(preferredMicEnabledRef.current);
+    setCameraEnabled(preferredCameraEnabledRef.current);
+
     setCallState('idle');
   }, []);
 
@@ -208,14 +255,57 @@ export function useCall({
     setError(null);
 
     try {
-      // Default: audio only. Camera is enabled manually by the user.
-      const stream = await navigator.mediaDevices.getUserMedia({
-        audio: true,
-        video: false,
-      });
+      const wantVideo = preferredCameraEnabledRef.current;
+
+      let stream: MediaStream;
+      let cameraFailed = false;
+
+      try {
+        stream = await navigator.mediaDevices.getUserMedia({
+          audio: true,
+          video: wantVideo,
+        });
+      } catch (firstError) {
+        // If camera failed, try audio-only.
+        if (wantVideo) {
+          try {
+            stream = await navigator.mediaDevices.getUserMedia({
+              audio: true,
+              video: false,
+            });
+
+            cameraFailed = true;
+          } catch (audioOnlyError) {
+            setError(getMediaErrorMessage(audioOnlyError));
+            setCallState('error');
+            return;
+          }
+        } else {
+          setError(getMediaErrorMessage(firstError));
+          setCallState('error');
+          return;
+        }
+      }
+
+      if (cameraFailed) {
+        setError('Camera unavailable. Continuing with microphone only.');
+        onCameraPreferenceChangeRef.current(false);
+      }
 
       localStreamRef.current = stream;
       setLocalStream(stream);
+
+      // Apply saved mic preference immediately.
+      const audioTrack = stream.getAudioTracks()[0];
+
+      if (audioTrack) {
+        audioTrack.enabled = preferredMicEnabledRef.current;
+      }
+
+      setMicEnabled(preferredMicEnabledRef.current);
+
+      const hasVideoTrack = stream.getVideoTracks().length > 0;
+      setCameraEnabled(hasVideoTrack);
 
       // Deterministic polite/impolite peer for perfect negotiation.
       const polite = userId > partnerId;
@@ -224,7 +314,7 @@ export function useCall({
         polite,
         onSignal: sendSignal,
         onRemoteStream: (incomingStream) => {
-        setRemoteStream(new MediaStream(incomingStream.getTracks()));
+          setRemoteStream(new MediaStream(incomingStream.getTracks()));
         },
         onConnectionStateChange: (state) => {
           if (state === 'connected') {
@@ -246,7 +336,7 @@ export function useCall({
 
       setCallState('connecting');
 
-      // Process any signaling messages that arrived before the peer existed.
+      // Process signaling messages that arrived before the peer existed.
       const pending = pendingSignalsRef.current.splice(
         0,
         pendingSignalsRef.current.length
@@ -354,24 +444,20 @@ export function useCall({
     };
   }, [sendSignal]);
 
-    const refreshLocalStream = useCallback(() => {
-    if (localStreamRef.current) {
-      setLocalStream(new MediaStream(localStreamRef.current.getTracks()));
-    }
-  }, []);
-
-    const toggleMic = useCallback(() => {
+  const toggleMic = useCallback(() => {
     const track = localStreamRef.current?.getAudioTracks()[0];
 
     if (!track) return;
 
     const next = !track.enabled;
     track.enabled = next;
+
     setMicEnabled(next);
+    onMicPreferenceChangeRef.current(next);
     refreshLocalStream();
   }, [refreshLocalStream]);
 
-    const toggleCamera = useCallback(async () => {
+  const toggleCamera = useCallback(async () => {
     const stream = localStreamRef.current;
     const peer = peerRef.current;
 
@@ -382,8 +468,11 @@ export function useCall({
     if (existingVideoTrack && existingVideoTrack.readyState === 'live') {
       const next = !existingVideoTrack.enabled;
       existingVideoTrack.enabled = next;
+
       setCameraEnabled(next);
+      onCameraPreferenceChangeRef.current(next);
       refreshLocalStream();
+
       return;
     }
 
@@ -402,9 +491,12 @@ export function useCall({
       peer.addTrack(videoTrack, stream);
 
       setCameraEnabled(true);
+      onCameraPreferenceChangeRef.current(true);
       refreshLocalStream();
     } catch (err) {
       setError(getMediaErrorMessage(err));
+      setCameraEnabled(false);
+      onCameraPreferenceChangeRef.current(false);
     }
   }, [refreshLocalStream]);
 

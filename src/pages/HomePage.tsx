@@ -23,6 +23,8 @@ import type { Room } from '../game/rooms';
 import type { PlayerPosition } from '../hooks/useMultiplayer';
 import type { FurnitureType } from '../game/furniture';
 import { useSpeakingIndicator } from '../hooks/useSpeakingIndicator';
+import { useMediaSettings } from '../hooks/useMediaSettings';
+import MediaControls from '../components/MediaControls';
 
 export default function HomePage() {
   const { session, loading: authLoading, signOut } = useAuth();
@@ -43,6 +45,12 @@ export default function HomePage() {
   const [catalogOpen, setCatalogOpen] = useState(false);
   const [selectedFurnitureId, setSelectedFurnitureId] = useState<string | null>(null);
   const [proximityEnabled] = useState(true);
+  const {
+    micEnabled: micPreference,
+    cameraEnabled: cameraPreference,
+    setMicEnabled: setMicPreference,
+    setCameraEnabled: setCameraPreference,
+  } = useMediaSettings();
 
   const { remotePlayers, partnerOnline, sendPosition, sendAvatarUpdate } = useMultiplayer(
     couple?.couple_id ?? null,
@@ -70,7 +78,7 @@ export default function HomePage() {
     enabled: proximityEnabled && sceneReady,
   });
 
-  const {
+    const {
     supported: webrtcSupported,
     callState,
     localStream,
@@ -88,10 +96,54 @@ export default function HomePage() {
     partnerOnline,
     near,
     proximityEnabled,
+    preferredMicEnabled: micPreference,
+    preferredCameraEnabled: cameraPreference,
+    onMicPreferenceChange: setMicPreference,
+    onCameraPreferenceChange: setCameraPreference,
   });
 
   const partnerSpeaking = useSpeakingIndicator(remoteStream, callState === 'connected');
   const localSpeaking = useSpeakingIndicator(localStream, Boolean(localStream) && micEnabled);
+
+    async function handleToggleMic() {
+    if (localStream) {
+      toggleMic();
+      return;
+    }
+
+    const next = !micPreference;
+    setMicPreference(next);
+
+    // If turning mic on outside a call, request permission early.
+    if (next && webrtcSupported) {
+      try {
+        const tempStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        tempStream.getTracks().forEach((track) => track.stop());
+      } catch {
+        setMicPreference(false);
+      }
+    }
+  }
+
+  async function handleToggleCamera() {
+    if (localStream) {
+      await toggleCamera();
+      return;
+    }
+
+    const next = !cameraPreference;
+    setCameraPreference(next);
+
+    // If turning camera on outside a call, request permission early.
+    if (next && webrtcSupported) {
+      try {
+        const tempStream = await navigator.mediaDevices.getUserMedia({ video: true });
+        tempStream.getTracks().forEach((track) => track.stop());
+      } catch {
+        setCameraPreference(false);
+      }
+    }
+  }
 
   // Handle incoming reactions/waves
   const handleAction = useCallback(
@@ -405,6 +457,16 @@ export default function HomePage() {
           )}
         </div>
       )}
+
+      {/* Media controls */}
+      <MediaControls
+        supported={webrtcSupported}
+        callState={callState}
+        micEnabled={micPreference}
+        cameraEnabled={cameraPreference}
+        onToggleMic={() => void handleToggleMic()}
+        onToggleCamera={() => void handleToggleCamera()}
+      />
 
       {/* Action bar */}
       <ActionBar
