@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import { supabase } from '../lib/supabase';
+import { getHouseLayout, findFreeSpot } from '../game/layouts';
+import { getFurnitureType } from '../game/furniture';
 
 export interface CoupleData {
   couple_id: string;
@@ -16,6 +18,46 @@ function withTimeout<T>(promise: PromiseLike<T>, milliseconds: number): Promise<
       setTimeout(() => reject(new Error('Supabase is taking too long to respond.')), milliseconds);
     }),
   ]);
+}
+
+// Keep furniture inside the playable area when the house layout changes.
+const FURNITURE_EDGE_MARGIN = 60;
+
+async function clampFurnitureToLayout(houseId: string, layoutId: string): Promise<void> {
+  if (!supabase) return;
+  const layout = getHouseLayout(layoutId);
+
+  const { data: items, error } = await supabase
+    .from('furniture')
+    .select('id, type, x, y')
+    .eq('house_id', houseId);
+
+  if (error) {
+    console.error('Failed to load furniture for clamping:', error);
+    return;
+  }
+  if (!items || items.length === 0) return;
+
+  for (const item of items) {
+    const type = getFurnitureType(item.type);
+    const spot = findFreeSpot(
+      layout,
+      Number(item.x),
+      Number(item.y),
+      type?.width ?? 32,
+      type?.height ?? 32
+    );
+
+    if (spot.x !== Number(item.x) || spot.y !== Number(item.y)) {
+      const { error: updateError } = await supabase
+        .from('furniture')
+        .update({ x: spot.x, y: spot.y })
+        .eq('id', item.id);
+      if (updateError) {
+        console.error('Failed to clamp furniture:', updateError);
+      }
+    }
+  }
 }
 
 export function useCouple(userId: string | null) {
@@ -40,6 +82,12 @@ export function useCouple(userId: string | null) {
         supabase.rpc('get_my_couple'),
         10000
       );
+
+      console.log('📡 [useCouple] fetch:',
+      'rows=' + (coupleData?.length ?? 0),
+      'error=' + (coupleError?.message ?? 'none'),
+      'userId=' + (userId ? userId.slice(0, 8) : 'NULL')
+    );
 
       if (coupleError) throw coupleError;
 
@@ -184,34 +232,43 @@ export function useCouple(userId: string | null) {
   );
 
     const updateLayout = useCallback(
-    async (layoutId: string): Promise<boolean> => {
-      if (!couple?.couple_id || !supabase) return false;
+  async (layoutId: string): Promise<boolean> => {
+    if (!couple?.couple_id || !supabase) return false;
 
-      const { error } = await supabase
-        .from('house_worlds')
-        .update({ layout_id: layoutId })
-        .eq('couple_id', couple.couple_id);
+    const { error } = await supabase
+      .from('house_worlds')
+      .update({ layout_id: layoutId })
+      .eq('couple_id', couple.couple_id);
+    if (error) {
+      console.error('Failed to update layout:', error);
+      return false;
+    }
 
-      if (error) {
-        console.error('Failed to update layout:', error);
-        return false;
-      }
+    // Keep furniture inside the new layout bounds (syncs to partner via realtime)
+    if (couple.house_id) {
+      await clampFurnitureToLayout(couple.house_id, layoutId);
+    }
 
-      await fetchCouple();
-      return true;
-    },
-    [couple?.couple_id, fetchCouple]
-  );
+    await fetchCouple();
+    return true;
+  },
+  [couple?.couple_id, couple?.house_id, fetchCouple]
+);
 
-   return {
-    couple,
-    inviteCode,
-    loading,
-    error,
-    createCouple,
-    createInvite,
-    joinCouple,
-    updateLayout,
-    refetch: fetchCouple,
-  };
+   // 🔧 FIX: If userId changed (e.g. session just resolved) but we haven't
+// loaded data for the new userId yet, report loading=true.
+// This closes the race window where coupleLoading=false but couple=null.
+const isLoading = loading || loadedUserId !== userId;
+
+return {
+  couple,
+  inviteCode,
+  loading: isLoading,
+  error,
+  createCouple,
+  createInvite,
+  joinCouple,
+  updateLayout,
+  refetch: fetchCouple,
+};
 }

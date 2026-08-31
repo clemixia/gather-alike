@@ -175,3 +175,58 @@ export const HOUSE_LAYOUTS: HouseLayout[] = [
 export function getHouseLayout(id?: string | null): HouseLayout {
   return HOUSE_LAYOUTS.find((layout) => layout.id === id) ?? HOUSE_LAYOUTS[0];
 }
+
+// ─── Furniture placement helpers ───
+
+/** True if a center-based rectangle overlaps any wall of the layout. */
+export function overlapsAnyWall(
+  layout: HouseLayout,
+  centerX: number,
+  centerY: number,
+  width: number,
+  height: number
+): boolean {
+  return layout.walls.some((wall) => {
+    const overlapX = Math.abs(centerX - wall.x) < (width + wall.w) / 2;
+    const overlapY = Math.abs(centerY - wall.y) < (height + wall.h) / 2;
+    return overlapX && overlapY;
+  });
+}
+
+/** Returns the nearest spot that stays inside the house and avoids all walls. */
+export function findFreeSpot(
+  layout: HouseLayout,
+  x: number,
+  y: number,
+  width: number,
+  height: number
+): { x: number; y: number } {
+  const margin = 60;
+  const clampX = (v: number) =>
+    Math.min(Math.max(v, margin), Math.max(margin, layout.width - margin));
+  const clampY = (v: number) =>
+    Math.min(Math.max(v, margin), Math.max(margin, layout.height - margin));
+
+  const startX = clampX(x);
+  const startY = clampY(y);
+
+  // Requested spot is already free
+  if (!overlapsAnyWall(layout, startX, startY, width, height)) {
+    return { x: startX, y: startY };
+  }
+
+  // Search outward in rings for the nearest free spot
+  for (let radius = 24; radius <= 240; radius += 24) {
+    for (let i = 0; i < 16; i++) {
+      const angle = (i / 16) * Math.PI * 2;
+      const cx = clampX(x + Math.cos(angle) * radius);
+      const cy = clampY(y + Math.sin(angle) * radius);
+      if (!overlapsAnyWall(layout, cx, cy, width, height)) {
+        return { x: cx, y: cy };
+      }
+    }
+  }
+
+  // Fallback: the spawn point is always free
+  return { x: layout.spawn.x, y: layout.spawn.y };
+}

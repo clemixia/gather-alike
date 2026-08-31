@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { Navigate } from 'react-router-dom';
+import { Navigate, useNavigate } from 'react-router-dom';
 import { useAuth } from '../hooks/useAuth';
 import { useProfile } from '../hooks/useProfile';
 import { useCouple } from '../hooks/useCouple';
@@ -25,6 +25,8 @@ import type { FurnitureType } from '../game/furniture';
 import { useSpeakingIndicator } from '../hooks/useSpeakingIndicator';
 import { useMediaSettings } from '../hooks/useMediaSettings';
 import MediaControls from '../components/MediaControls';
+import { getHouseLayout, findFreeSpot } from '../game/layouts';
+
 
 export default function HomePage() {
   const { session, loading: authLoading, signOut } = useAuth();
@@ -51,6 +53,9 @@ export default function HomePage() {
     setMicEnabled: setMicPreference,
     setCameraEnabled: setCameraPreference,
   } = useMediaSettings();
+
+  const navigate = useNavigate();
+  const currentLayout = getHouseLayout(couple?.layout_id);
 
   const { remotePlayers, partnerOnline, sendPosition, sendAvatarUpdate } = useMultiplayer(
     couple?.couple_id ?? null,
@@ -265,12 +270,22 @@ export default function HomePage() {
     );
   }
 
+    // Only redirect if we are 100% sure there is no session or no couple
   if (!session || !couple) {
-    return <Navigate to={!session ? '/login' : '/couple/setup'} replace />;
-  }
+  console.log('🔴 [HomePage] REDIRECTING:', {
+    hasSession: Boolean(session),
+    hasCouple: Boolean(couple),
+    coupleLoading,
+    authLoading,
+    profileLoading,
+    avatarLoading,
+  });
+  return <Navigate to={!session ? '/login' : '/couple/setup'} replace />;
+}
 
   const sceneConfig = {
     avatar,
+    layout: currentLayout,
     onPositionUpdate: (pos: Omit<PlayerPosition, 'userId'>) => {
       localPositionRef.current = {
         x: pos.x,
@@ -297,12 +312,12 @@ export default function HomePage() {
   }
 
   function handleFurnitureSelect(type: FurnitureType) {
-    const pos = localPositionRef.current;
-    const x = pos ? pos.x + 50 : 400;
-    const y = pos ? pos.y : 300;
-
-    addFurniture(type.id, x, y);
-  }
+  const pos = localPositionRef.current;
+  const rawX = pos ? pos.x + 50 : 400;
+  const rawY = pos ? pos.y : 300;
+  const spot = findFreeSpot(currentLayout, rawX, rawY, type.width, type.height);
+  addFurniture(type.id, spot.x, spot.y);
+}
 
   function handleRotateSelected() {
     if (!selectedFurnitureId) return;
@@ -341,31 +356,40 @@ export default function HomePage() {
       <GameCanvas ref={gameRef} sceneConfig={sceneConfig} />
 
       {/* Top-right controls */}
-      <div
-        style={{
-          position: 'absolute',
-          top: '16px',
-          right: '16px',
-          zIndex: 1000,
-          display: 'flex',
-          gap: '8px',
-        }}
-      >
-        <button
-          className="button secondary small"
-          onClick={() => setShowCustomizer(true)}
-          style={{ background: 'rgba(255, 255, 255, 0.9)', backdropFilter: 'blur(8px)' }}
+        <div
+          style={{
+            position: 'absolute',
+            top: '16px',
+            right: '16px',
+            zIndex: 1000,
+            display: 'flex',
+            gap: '8px',
+          }}
         >
-          ✨ Customize
-        </button>
-        <button
-          className="button secondary small"
-          onClick={() => void signOut()}
-          style={{ background: 'rgba(255, 255, 255, 0.9)', backdropFilter: 'blur(8px)' }}
-        >
-          Log out
-        </button>
-      </div>
+          {/* ← NEW BUTTON */}
+          <button
+            className="button secondary small"
+            onClick={() => navigate('/house-selection')}
+            style={{ background: 'rgba(255, 255, 255, 0.9)', backdropFilter: 'blur(8px)' }}
+          >
+            🏠 House
+          </button>
+          
+          <button
+            className="button secondary small"
+            onClick={() => setShowCustomizer(true)}
+            style={{ background: 'rgba(255, 255, 255, 0.9)', backdropFilter: 'blur(8px)' }}
+          >
+            ✨ Customize
+          </button>
+          <button
+            className="button secondary small"
+            onClick={() => void signOut()}
+            style={{ background: 'rgba(255, 255, 255, 0.9)', backdropFilter: 'blur(8px)' }}
+          >
+            Log out
+          </button>
+        </div>
 
       {/* Top-left: couple info + partner status */}
       <div

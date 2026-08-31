@@ -1,3 +1,4 @@
+// src/game/scenes/MainScene.ts
 import Phaser from 'phaser';
 import { getRoomAtPosition, type Room } from '../rooms';
 import type { PlayerPosition } from '../../hooks/useMultiplayer';
@@ -5,9 +6,12 @@ import type { AvatarConfig } from '../types';
 import { AvatarRenderer } from '../AvatarRenderer';
 import { DEFAULT_AVATAR } from '../types';
 import { getFurnitureType, type FurnitureInstance } from '../furniture';
+import { getHouseLayout, type HouseLayout, findFreeSpot } from '../layouts';
+
 
 export interface MainSceneConfig {
   avatar?: AvatarConfig;
+  layout?: HouseLayout;
   onPositionUpdate?: (pos: Omit<PlayerPosition, 'userId'>) => void;
   onRoomChange?: (room: Room | null) => void;
   onReady?: () => void;
@@ -43,6 +47,7 @@ export default class MainScene extends Phaser.Scene {
   // World
   private walls!: Phaser.Physics.Arcade.StaticGroup;
   private currentRoom: Room | null = null;
+  private currentLayout: HouseLayout | null = null;
 
   // Remote players
   private remotePlayers = new Map<string, RemotePlayer>();
@@ -83,6 +88,7 @@ export default class MainScene extends Phaser.Scene {
     this.callbacksRef.onReady = data.onReady;
     this.callbacksRef.onFurnitureMove = data.onFurnitureMove;
     this.localAvatarConfig = data.avatar ?? DEFAULT_AVATAR;
+    this.currentLayout = data.layout ?? getHouseLayout(null);
   }
 
   public updateConfig(config: MainSceneConfig) {
@@ -90,6 +96,7 @@ export default class MainScene extends Phaser.Scene {
     this.callbacksRef.onRoomChange = config.onRoomChange;
     this.callbacksRef.onReady = config.onReady;
     this.callbacksRef.onFurnitureMove = config.onFurnitureMove;
+
     if (config.avatar) {
       this.localAvatarConfig = config.avatar;
       if (this.localAvatar) {
@@ -97,38 +104,51 @@ export default class MainScene extends Phaser.Scene {
         this.localNameText.setText(config.avatar.name);
       }
     }
+
+    // Handle layout change (user switched house)
+    if (config.layout && config.layout.id !== this.currentLayout?.id) {
+      this.currentLayout = config.layout;
+      this.rebuildWorld();
+    }
   }
 
   create() {
-    // Floor
-    this.add.rectangle(400, 300, 800, 600, 0xf5e6d3);
+    const layout = this.currentLayout ?? getHouseLayout(null);
 
-    // Room labels
-    this.add.text(150, 200, '🛏️', { fontSize: '32px' }).setOrigin(0.5).setAlpha(0.4);
-    this.add.text(550, 200, '🍳', { fontSize: '32px' }).setOrigin(0.5).setAlpha(0.4);
-    this.add.text(200, 500, '🛋️', { fontSize: '32px' }).setOrigin(0.5).setAlpha(0.4);
-    this.add.text(600, 500, '🍽️', { fontSize: '32px' }).setOrigin(0.5).setAlpha(0.4);
+    // ─── Floor ───
+    this.add.rectangle(
+      layout.width / 2,
+      layout.height / 2,
+      layout.width,
+      layout.height,
+      layout.floorColor
+    );
 
-    // Walls
-    const wallColor = 0x8b7355;
+    // ─── Room labels ───
+    for (const room of layout.rooms) {
+      if (room.emoji) {
+        const cx = room.bounds.x + room.bounds.width / 2;
+        const cy = room.bounds.y + room.bounds.height / 2;
+        this.add.text(cx, cy, room.emoji, { fontSize: '32px' })
+          .setOrigin(0.5)
+          .setAlpha(0.4);
+      }
+    }
+
+    // ─── Walls ───
     this.walls = this.physics.add.staticGroup();
+    for (const wall of layout.walls) {
+      const wallRect = this.add.rectangle(wall.x, wall.y, wall.w, wall.h, layout.wallColor);
+      this.walls.add(wallRect);
+    }
 
-    const addWall = (x: number, y: number, w: number, h: number) => {
-      const wall = this.add.rectangle(x, y, w, h, wallColor);
-      this.walls.add(wall);
-    };
+    // ─── Local player avatar ───
+    const spawnX = layout.spawn.x;
+    const spawnY = layout.spawn.y;
 
-    addWall(400, 50, 800, 20);
-    addWall(400, 550, 800, 20);
-    addWall(50, 300, 20, 600);
-    addWall(750, 300, 20, 600);
-    addWall(300, 200, 20, 200);
-    addWall(500, 400, 200, 20);
-
-    // Local player avatar
-    this.localAvatar = new AvatarRenderer(this, 400, 300, this.localAvatarConfig);
+    this.localAvatar = new AvatarRenderer(this, spawnX, spawnY, this.localAvatarConfig);
     this.localNameText = this.add
-      .text(400, 272, this.localAvatarConfig.name, {
+      .text(spawnX, spawnY - 28, this.localAvatarConfig.name, {
         fontSize: '12px',
         color: '#5b4650',
         fontStyle: 'bold',
@@ -136,17 +156,16 @@ export default class MainScene extends Phaser.Scene {
       .setOrigin(0.5);
 
     // Physics body (invisible)
-    this.localPhysicsBody = this.add.rectangle(400, 300, 20, 20, 0x000000, 0);
+    this.localPhysicsBody = this.add.rectangle(spawnX, spawnY, 20, 20, 0x000000, 0);
     this.physics.world.enable(this.localPhysicsBody);
     (this.localPhysicsBody.body as Phaser.Physics.Arcade.Body).setCollideWorldBounds(true);
-
     this.physics.add.collider(this.localPhysicsBody, this.walls);
 
-    // Camera
-    this.cameras.main.setBounds(0, 0, 800, 600);
+    // ─── Camera ───
+    this.cameras.main.setBounds(0, 0, layout.width, layout.height);
     this.cameras.main.startFollow(this.localPhysicsBody, true, 0.1, 0.1);
 
-    // Input
+    // ─── Input ───
     if (this.input.keyboard) {
       this.cursors = this.input.keyboard.createCursorKeys();
       this.wasd = this.input.keyboard.addKeys({
@@ -157,10 +176,9 @@ export default class MainScene extends Phaser.Scene {
       }) as any;
     }
 
-    // Furniture drag handlers (scene-level)
+    // ─── Furniture drag handlers (scene-level) ───
     this.input.on('pointerdown', (pointer: Phaser.Input.Pointer) => {
       if (!this.editMode) return;
-
       const hitId = this.findFurnitureAt(pointer.worldX, pointer.worldY);
       if (hitId) {
         this.selectFurniture(hitId);
@@ -178,19 +196,20 @@ export default class MainScene extends Phaser.Scene {
     });
 
     this.input.on('pointerup', () => {
-      if (this.draggingFurniture) {
-        const sprite = this.furnitureSprites.get(this.draggingFurniture.id);
-        if (sprite) {
-          this.callbacksRef.onFurnitureMove?.(
-            this.draggingFurniture.id,
-            sprite.x,
-            sprite.y
-          );
-        }
-        this.draggingFurniture = null;
-        this.rebuildFurnitureCollision();
+  if (this.draggingFurniture) {
+    const sprite = this.furnitureSprites.get(this.draggingFurniture.id);
+    if (sprite) {
+      const spot = this.resolveFurnitureDrop(sprite, sprite.x, sprite.y);
+      sprite.setPosition(spot.x, spot.y);
+      if (this.selectionIndicator) {
+        this.selectionIndicator.setPosition(spot.x, spot.y);
       }
-    });
+      this.callbacksRef.onFurnitureMove?.(this.draggingFurniture.id, spot.x, spot.y);
+    }
+    this.draggingFurniture = null;
+    this.rebuildFurnitureCollision();
+  }
+});
 
     this.updateRoom();
 
@@ -198,6 +217,19 @@ export default class MainScene extends Phaser.Scene {
     this.time.delayedCall(400, () => {
       this.callbacksRef.onReady?.();
       this.broadcastPosition(true);
+    });
+  }
+
+  // ─── Rebuild world when layout changes ───
+  private rebuildWorld() {
+    // Clear everything and restart the scene with new layout
+    this.scene.restart({
+      avatar: this.localAvatarConfig,
+      layout: this.currentLayout,
+      onPositionUpdate: this.callbacksRef.onPositionUpdate,
+      onRoomChange: this.callbacksRef.onRoomChange,
+      onReady: this.callbacksRef.onReady,
+      onFurnitureMove: this.callbacksRef.onFurnitureMove,
     });
   }
 
@@ -260,22 +292,23 @@ export default class MainScene extends Phaser.Scene {
         if (this.selectionIndicator) {
           this.selectionIndicator.setPosition(newX, newY);
         }
-      } else if (!this.input.activePointer.isDown) {
-        if (sprite) {
-          this.callbacksRef.onFurnitureMove?.(
-            this.draggingFurniture.id,
-            sprite.x,
-            sprite.y
-          );
+      }  else if (!this.input.activePointer.isDown) {
+          if (sprite) {
+            const spot = this.resolveFurnitureDrop(sprite, sprite.x, sprite.y);
+            sprite.setPosition(spot.x, spot.y);
+            if (this.selectionIndicator) {
+              this.selectionIndicator.setPosition(spot.x, spot.y);
+            }
+            this.callbacksRef.onFurnitureMove?.(this.draggingFurniture.id, spot.x, spot.y);
+          }
+          this.draggingFurniture = null;
+          this.rebuildFurnitureCollision();
         }
-        this.draggingFurniture = null;
-        this.rebuildFurnitureCollision();
-      }
     }
 
     this.updateRoom();
 
-        // Interpolate remote players
+    // Interpolate remote players
     this.remotePlayers.forEach((rp) => {
       const lerpFactor = Math.min(1, (delta / 100) * 0.6);
       const newX = rp.avatar.getContainer().x + (rp.targetX - rp.avatar.getContainer().x) * lerpFactor;
@@ -286,21 +319,16 @@ export default class MainScene extends Phaser.Scene {
 
     // Speaking indicator above partner avatar
     const firstRemote = this.remotePlayers.values().next().value;
-
     if (this.partnerSpeaking && firstRemote) {
       if (!this.speakingIndicator) {
         this.speakingIndicator = this.add
-          .text(0, 0, '🔊', {
-            fontSize: '18px',
-          })
+          .text(0, 0, '🔊', { fontSize: '18px' })
           .setOrigin(0.5)
           .setDepth(1000);
       }
-
       const indicatorX = firstRemote.avatar.getContainer().x + 18;
       const indicatorY = firstRemote.avatar.getContainer().y - 34;
       const pulse = 1 + Math.sin(_time / 120) * 0.18;
-
       this.speakingIndicator.setPosition(indicatorX, indicatorY);
       this.speakingIndicator.setScale(pulse);
     } else if (this.speakingIndicator) {
@@ -325,8 +353,24 @@ export default class MainScene extends Phaser.Scene {
     this.callbacksRef.onPositionUpdate?.(payload);
   }
 
+  private resolveFurnitureDrop(
+  sprite: Phaser.GameObjects.Container,
+  x: number,
+  y: number
+): { x: number; y: number } {
+  if (!this.currentLayout) return { x, y };
+  const w = (sprite.getData('width') as number) ?? 32;
+  const h = (sprite.getData('height') as number) ?? 32;
+  return findFreeSpot(this.currentLayout, x, y, w, h);
+}
+
   private updateRoom() {
-    const room = getRoomAtPosition(this.localPhysicsBody.x, this.localPhysicsBody.y);
+    if (!this.currentLayout) return;
+    const room = getRoomAtPosition(
+      this.localPhysicsBody.x,
+      this.localPhysicsBody.y,
+      this.currentLayout.rooms
+    );
     if (room?.id !== this.currentRoom?.id) {
       this.currentRoom = room;
       this.callbacksRef.onRoomChange?.(room);
@@ -334,7 +378,6 @@ export default class MainScene extends Phaser.Scene {
   }
 
   // ─── Remote Players ───
-
   public setRemotePlayer(userId: string, pos: PlayerPosition) {
     let rp = this.remotePlayers.get(userId);
     if (!rp) {
@@ -346,6 +389,7 @@ export default class MainScene extends Phaser.Scene {
           fontStyle: 'bold',
         })
         .setOrigin(0.5);
+
       rp = {
         avatar,
         nameText,
@@ -357,7 +401,6 @@ export default class MainScene extends Phaser.Scene {
     } else {
       rp.targetX = pos.x;
       rp.targetY = pos.y;
-
       if (pos.avatar && !avatarsEqual(pos.avatar, rp.currentAvatar)) {
         rp.avatar.update(pos.avatar);
         rp.currentAvatar = pos.avatar;
@@ -366,27 +409,25 @@ export default class MainScene extends Phaser.Scene {
     }
   }
 
-    public removeRemotePlayer(userId: string) {
+  public removeRemotePlayer(userId: string) {
     const rp = this.remotePlayers.get(userId);
     if (rp) {
       rp.avatar.destroy();
       rp.nameText.destroy();
       this.remotePlayers.delete(userId);
     }
-
     if (this.remotePlayers.size === 0 && this.speakingIndicator) {
       this.speakingIndicator.destroy();
       this.speakingIndicator = null;
     }
   }
 
-    public clearRemotePlayers() {
+  public clearRemotePlayers() {
     this.remotePlayers.forEach((rp) => {
       rp.avatar.destroy();
       rp.nameText.destroy();
     });
     this.remotePlayers.clear();
-
     if (this.speakingIndicator) {
       this.speakingIndicator.destroy();
       this.speakingIndicator = null;
@@ -394,7 +435,6 @@ export default class MainScene extends Phaser.Scene {
   }
 
   // ─── Local Avatar ───
-
   public updateLocalAvatar(config: AvatarConfig) {
     this.localAvatarConfig = config;
     if (this.localAvatar) {
@@ -404,7 +444,6 @@ export default class MainScene extends Phaser.Scene {
   }
 
   // ─── Floating Emoji / Wave ───
-
   public showFloatingEmoji(userId: string, emoji: string) {
     let x: number, y: number;
     const rp = this.remotePlayers.get(userId);
@@ -467,7 +506,6 @@ export default class MainScene extends Phaser.Scene {
   }
 
   // ─── Furniture ───
-
   public setEditMode(enabled: boolean) {
     this.editMode = enabled;
     if (!enabled) {
@@ -476,7 +514,6 @@ export default class MainScene extends Phaser.Scene {
   }
 
   public setFurniture(items: FurnitureInstance[]) {
-    // Remove sprites that no longer exist
     const currentIds = new Set(items.map((f) => f.id));
     for (const [id, sprite] of this.furnitureSprites.entries()) {
       if (!currentIds.has(id)) {
@@ -485,7 +522,6 @@ export default class MainScene extends Phaser.Scene {
       }
     }
 
-    // Add or update sprites
     for (const item of items) {
       let sprite = this.furnitureSprites.get(item.id);
       if (!sprite) {
@@ -496,12 +532,12 @@ export default class MainScene extends Phaser.Scene {
       }
     }
 
-    // Rebuild collision
     this.rebuildFurnitureCollision();
   }
 
   private createFurnitureSprite(item: FurnitureInstance): Phaser.GameObjects.Container {
     const type = getFurnitureType(item.type);
+
     if (!type) {
       const container = this.add.container(item.x, item.y);
       const text = this.add.text(0, 0, '?', { fontSize: '32px' }).setOrigin(0.5);
@@ -520,19 +556,17 @@ export default class MainScene extends Phaser.Scene {
     container.setData('width', type.width);
     container.setData('height', type.height);
 
-    // Subtle shadow
     const shadow = this.add.rectangle(0, 2, type.width, type.height, 0x000000, 0.08);
     shadow.setStrokeStyle(1, 0x000000, 0.1);
     container.add(shadow);
 
-    // Emoji as primary visual
     const emojiSize = Math.min(type.width, type.height) * 1.2;
     const emoji = this.add.text(0, 0, type.emoji, {
       fontSize: `${emojiSize}px`,
       align: 'center',
     }).setOrigin(0.5);
-    container.add(emoji);
 
+    container.add(emoji);
     container.setRotation((item.rotation * Math.PI) / 180);
     container.setDepth(5);
 
@@ -540,9 +574,7 @@ export default class MainScene extends Phaser.Scene {
   }
 
   private updateFurnitureSprite(sprite: Phaser.GameObjects.Container, item: FurnitureInstance) {
-    // Don't update position if we're dragging this item
     if (this.draggingFurniture?.id === item.id) return;
-
     sprite.setPosition(item.x, item.y);
     sprite.setRotation((item.rotation * Math.PI) / 180);
   }
@@ -555,6 +587,7 @@ export default class MainScene extends Phaser.Scene {
     if (sprite) {
       const w = (sprite.getData('width') as number) ?? 32;
       const h = (sprite.getData('height') as number) ?? 32;
+
       this.selectionIndicator = this.add.rectangle(
         sprite.x,
         sprite.y,
@@ -602,9 +635,8 @@ export default class MainScene extends Phaser.Scene {
     this.clearSelection();
   }
 
-    public setPartnerSpeaking(speaking: boolean) {
+  public setPartnerSpeaking(speaking: boolean) {
     this.partnerSpeaking = speaking;
-
     if (!speaking && this.speakingIndicator) {
       this.speakingIndicator.destroy();
       this.speakingIndicator = null;
@@ -612,24 +644,20 @@ export default class MainScene extends Phaser.Scene {
   }
 
   private rebuildFurnitureCollision() {
-    // Remove old furniture bodies
     if (this.furnitureCollider) {
       this.furnitureCollider.destroy();
     }
 
-    // Create new static group for furniture
     this.furnitureBodies = this.physics.add.staticGroup();
 
     for (const [id, sprite] of this.furnitureSprites.entries()) {
       const w = (sprite.getData('width') as number) ?? 32;
       const h = (sprite.getData('height') as number) ?? 32;
-
       const body = this.add.rectangle(sprite.x, sprite.y, w, h, 0x000000, 0);
       this.furnitureBodies.add(body);
       body.setData('furnitureId', id);
     }
 
-    // Add collider with player
     this.furnitureCollider = this.physics.add.collider(this.localPhysicsBody, this.furnitureBodies);
   }
 }

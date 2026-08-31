@@ -5,7 +5,7 @@ import { useCouple } from '../hooks/useCouple';
 export default function CoupleSetupPage() {
   const navigate = useNavigate();
   const { session } = useAuth();
-  const { couple, loading, createCouple, error } = useCouple(session?.user?.id ?? null);
+  const { couple, loading, error } = useCouple(session?.user?.id ?? null);
 
   if (loading) {
     return (
@@ -18,16 +18,16 @@ export default function CoupleSetupPage() {
   }
 
   // If they already have a couple, send them to home (not invite)
+    // If they already have a couple, send them to home (not invite)
+  // BUT: Don't redirect if we just came from /home (prevents infinite loop)
   if (couple) {
-    return <Navigate to="/home" replace />;
-  }
+  console.log('🟢 [CoupleSetup] Couple exists → redirecting to /home');
+  return <Navigate to="/home" replace />;
+}
 
-  async function handleCreate() {
-    const code = await createCouple('Our Tiny Home');
-    if (code) {
-      navigate('/couple/invite', { state: { code } });
-    }
-  }
+  function handleCreate() {
+  navigate('/house-selection');
+}
 
   return (
     <main className="page">

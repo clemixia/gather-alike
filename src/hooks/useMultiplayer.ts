@@ -47,17 +47,6 @@ export function useMultiplayer(coupleId: string | null, userId: string | null) {
       }
     });
 
-    channel.on('broadcast', { event: 'position' }, ({ payload }) => {
-        const pos = payload as PlayerPosition;
-        console.log('[useMultiplayer] received position broadcast from', pos.userId, 'at', pos.x, pos.y);
-        if (pos.userId && pos.userId !== userId) {
-            setRemotePlayers((prev) => {
-            const next = new Map(prev);
-            next.set(pos.userId, pos);
-            return next;
-            });
-        }
-        });
 
     channel.on('presence', { event: 'join' }, () => {
       const state = channel.presenceState();
