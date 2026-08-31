@@ -75,8 +75,35 @@ export function useCouple(userId: string | null) {
     fetchCouple();
   }, [fetchCouple]);
 
-  const createCouple = useCallback(
-    async (name: string = 'Our Home') => {
+    // Realtime sync for house layout changes
+  useEffect(() => {
+    if (!couple?.couple_id || !supabase) return;
+
+    const channel = supabase
+      .channel(`house:${couple.couple_id}`)
+      .on(
+        'postgres_changes',
+        {
+          event: 'UPDATE',
+          schema: 'public',
+          table: 'house_worlds',
+          filter: `couple_id=eq.${couple.couple_id}`,
+        },
+        () => {
+          fetchCouple();
+        }
+      )
+      .subscribe();
+
+    return () => {
+      if (supabase) {
+        supabase.removeChannel(channel);
+      }
+    };
+  }, [couple?.couple_id, fetchCouple]);
+
+    const createCouple = useCallback(
+    async (name: string = 'Our Home', layoutId: string = 'cozy-house') => {
       if (!userId || !supabase) return null;
 
       setError(null);
@@ -84,7 +111,7 @@ export function useCouple(userId: string | null) {
       try {
         const { data: coupleId, error: createError } = await supabase.rpc('create_couple', {
           p_name: name,
-          p_layout_id: 'cozy-house',
+          p_layout_id: layoutId,
         });
 
         if (createError) throw createError;
@@ -156,14 +183,35 @@ export function useCouple(userId: string | null) {
     [userId, fetchCouple]
   );
 
-  return {
+    const updateLayout = useCallback(
+    async (layoutId: string): Promise<boolean> => {
+      if (!couple?.couple_id || !supabase) return false;
+
+      const { error } = await supabase
+        .from('house_worlds')
+        .update({ layout_id: layoutId })
+        .eq('couple_id', couple.couple_id);
+
+      if (error) {
+        console.error('Failed to update layout:', error);
+        return false;
+      }
+
+      await fetchCouple();
+      return true;
+    },
+    [couple?.couple_id, fetchCouple]
+  );
+
+   return {
     couple,
     inviteCode,
-    loading: loading || loadedUserId !== userId,
+    loading,
     error,
     createCouple,
     createInvite,
     joinCouple,
+    updateLayout,
     refetch: fetchCouple,
   };
 }
