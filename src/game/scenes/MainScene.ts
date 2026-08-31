@@ -55,6 +55,8 @@ export default class MainScene extends Phaser.Scene {
   private draggingFurniture: { id: string; startX: number; startY: number } | null = null;
   private selectedFurnitureId: string | null = null;
   private selectionIndicator: Phaser.GameObjects.Rectangle | null = null;
+  private partnerSpeaking = false;
+  private speakingIndicator: Phaser.GameObjects.Text | null = null;
 
   // Broadcast throttling
   private lastBroadcastTime = 0;
@@ -273,7 +275,7 @@ export default class MainScene extends Phaser.Scene {
 
     this.updateRoom();
 
-    // Interpolate remote players
+        // Interpolate remote players
     this.remotePlayers.forEach((rp) => {
       const lerpFactor = Math.min(1, (delta / 100) * 0.6);
       const newX = rp.avatar.getContainer().x + (rp.targetX - rp.avatar.getContainer().x) * lerpFactor;
@@ -281,6 +283,30 @@ export default class MainScene extends Phaser.Scene {
       rp.avatar.setPosition(newX, newY);
       rp.nameText?.setPosition(newX, newY - 28);
     });
+
+    // Speaking indicator above partner avatar
+    const firstRemote = this.remotePlayers.values().next().value;
+
+    if (this.partnerSpeaking && firstRemote) {
+      if (!this.speakingIndicator) {
+        this.speakingIndicator = this.add
+          .text(0, 0, '🔊', {
+            fontSize: '18px',
+          })
+          .setOrigin(0.5)
+          .setDepth(1000);
+      }
+
+      const indicatorX = firstRemote.avatar.getContainer().x + 18;
+      const indicatorY = firstRemote.avatar.getContainer().y - 34;
+      const pulse = 1 + Math.sin(_time / 120) * 0.18;
+
+      this.speakingIndicator.setPosition(indicatorX, indicatorY);
+      this.speakingIndicator.setScale(pulse);
+    } else if (this.speakingIndicator) {
+      this.speakingIndicator.destroy();
+      this.speakingIndicator = null;
+    }
   }
 
   private broadcastPosition(_force: boolean) {
@@ -340,21 +366,31 @@ export default class MainScene extends Phaser.Scene {
     }
   }
 
-  public removeRemotePlayer(userId: string) {
+    public removeRemotePlayer(userId: string) {
     const rp = this.remotePlayers.get(userId);
     if (rp) {
       rp.avatar.destroy();
       rp.nameText.destroy();
       this.remotePlayers.delete(userId);
     }
+
+    if (this.remotePlayers.size === 0 && this.speakingIndicator) {
+      this.speakingIndicator.destroy();
+      this.speakingIndicator = null;
+    }
   }
 
-  public clearRemotePlayers() {
+    public clearRemotePlayers() {
     this.remotePlayers.forEach((rp) => {
       rp.avatar.destroy();
       rp.nameText.destroy();
     });
     this.remotePlayers.clear();
+
+    if (this.speakingIndicator) {
+      this.speakingIndicator.destroy();
+      this.speakingIndicator = null;
+    }
   }
 
   // ─── Local Avatar ───
@@ -564,6 +600,15 @@ export default class MainScene extends Phaser.Scene {
 
   public clearFurnitureSelection() {
     this.clearSelection();
+  }
+
+    public setPartnerSpeaking(speaking: boolean) {
+    this.partnerSpeaking = speaking;
+
+    if (!speaking && this.speakingIndicator) {
+      this.speakingIndicator.destroy();
+      this.speakingIndicator = null;
+    }
   }
 
   private rebuildFurnitureCollision() {

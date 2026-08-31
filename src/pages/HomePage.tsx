@@ -9,6 +9,8 @@ import { useChat } from '../hooks/useChat';
 import { useActions, type ActionEvent } from '../hooks/useActions';
 import { usePresence } from '../hooks/usePresence';
 import { useFurniture } from '../hooks/useFurniture';
+import { useProximity, type LocalPosition } from '../hooks/useProximity';
+import { useCall } from '../hooks/useCall';
 import { isSupabaseConfigured } from '../lib/env';
 import GameCanvas, { type GameCanvasHandle } from '../components/GameCanvas';
 import AvatarCustomizer from '../components/AvatarCustomizer';
@@ -16,17 +18,22 @@ import ChatPanel from '../components/ChatPanel';
 import EmojiPicker from '../components/EmojiPicker';
 import ActionBar from '../components/ActionBar';
 import FurnitureCatalog from '../components/FurnitureCatalog';
+import CallPanel from '../components/CallPanel';
 import type { Room } from '../game/rooms';
 import type { PlayerPosition } from '../hooks/useMultiplayer';
 import type { FurnitureType } from '../game/furniture';
+import { useSpeakingIndicator } from '../hooks/useSpeakingIndicator';
 
 export default function HomePage() {
   const { session, loading: authLoading, signOut } = useAuth();
   const { profile, loading: profileLoading } = useProfile(session?.user?.id ?? null);
   const { couple, loading: coupleLoading } = useCouple(session?.user?.id ?? null);
   const { avatar, loading: avatarLoading, saveAvatar } = useAvatar(session?.user?.id ?? null);
+  const { profile: partnerProfile } = useProfile(couple?.partner_id ?? null);
 
   const gameRef = useRef<GameCanvasHandle>(null);
+  const localPositionRef = useRef<LocalPosition | null>(null);
+
   const [currentRoom, setCurrentRoom] = useState<Room | null>(null);
   const [showCustomizer, setShowCustomizer] = useState(false);
   const [sceneReady, setSceneReady] = useState(false);
@@ -35,11 +42,7 @@ export default function HomePage() {
   const [editMode, setEditMode] = useState(false);
   const [catalogOpen, setCatalogOpen] = useState(false);
   const [selectedFurnitureId, setSelectedFurnitureId] = useState<string | null>(null);
-
-    // Debug: track editMode changes
-  useEffect(() => {
-    console.log('[HomePage] editMode changed to:', editMode);
-  }, [editMode]);
+  const [proximityEnabled] = useState(true);
 
   const { remotePlayers, partnerOnline, sendPosition, sendAvatarUpdate } = useMultiplayer(
     couple?.couple_id ?? null,
@@ -59,7 +62,38 @@ export default function HomePage() {
   const { furniture, addFurniture, moveFurniture, rotateFurniture, deleteFurniture } =
     useFurniture(couple?.house_id ?? null, session?.user?.id ?? null);
 
-  // Handle incoming actions
+  const near = useProximity({
+    localPositionRef,
+    remotePlayers,
+    partnerId: couple?.partner_id ?? null,
+    partnerOnline,
+    enabled: proximityEnabled && sceneReady,
+  });
+
+  const {
+    supported: webrtcSupported,
+    callState,
+    localStream,
+    remoteStream,
+    micEnabled,
+    cameraEnabled,
+    error: callError,
+    toggleMic,
+    toggleCamera,
+    endCall,
+  } = useCall({
+    coupleId: couple?.couple_id ?? null,
+    userId: session?.user?.id ?? null,
+    partnerId: couple?.partner_id ?? null,
+    partnerOnline,
+    near,
+    proximityEnabled,
+  });
+
+  const partnerSpeaking = useSpeakingIndicator(remoteStream, callState === 'connected');
+  const localSpeaking = useSpeakingIndicator(localStream, Boolean(localStream) && micEnabled);
+
+  // Handle incoming reactions/waves
   const handleAction = useCallback(
     (action: ActionEvent) => {
       if (!sceneReady) return;
@@ -98,23 +132,26 @@ export default function HomePage() {
   // Poll for selected furniture
   useEffect(() => {
     if (!sceneReady || !editMode) return;
+
     const interval = setInterval(() => {
       const scene = gameRef.current?.getScene();
       if (scene) {
-        const selected = scene.getSelectedFurnitureId();
-        setSelectedFurnitureId(selected);
+        setSelectedFurnitureId(scene.getSelectedFurnitureId());
       }
     }, 100);
+
     return () => clearInterval(interval);
   }, [sceneReady, editMode]);
 
   // Mark activity on user interactions
   useEffect(() => {
     const handleActivity = () => markActive();
+
     window.addEventListener('keydown', handleActivity);
     window.addEventListener('mousemove', handleActivity);
     window.addEventListener('touchstart', handleActivity);
     window.addEventListener('click', handleActivity);
+
     return () => {
       window.removeEventListener('keydown', handleActivity);
       window.removeEventListener('mousemove', handleActivity);
@@ -128,6 +165,7 @@ export default function HomePage() {
     if (!sceneReady) return;
     const scene = gameRef.current?.getScene();
     if (!scene) return;
+
     remotePlayers.forEach((pos, userId) => {
       scene.setRemotePlayer(userId, pos);
     });
@@ -135,6 +173,7 @@ export default function HomePage() {
 
   useEffect(() => {
     if (!sceneReady) return;
+
     if (!partnerOnline) {
       const scene = gameRef.current?.getScene();
       scene?.clearRemotePlayers();
@@ -147,7 +186,11 @@ export default function HomePage() {
     scene?.updateLocalAvatar(avatar);
   }, [avatar, sceneReady]);
 
-  const partnerName = profile?.display_name ?? 'Partner';
+    useEffect(() => {
+    if (!sceneReady) return;
+    const scene = gameRef.current?.getScene();
+    scene?.setPartnerSpeaking(partnerSpeaking);
+  }, [partnerSpeaking, sceneReady]);
 
   if (!isSupabaseConfigured()) {
     return (
@@ -177,6 +220,12 @@ export default function HomePage() {
   const sceneConfig = {
     avatar,
     onPositionUpdate: (pos: Omit<PlayerPosition, 'userId'>) => {
+      localPositionRef.current = {
+        x: pos.x,
+        y: pos.y,
+        room: pos.room,
+      };
+
       sendPosition({ ...pos, avatar });
       markActive();
     },
@@ -196,25 +245,28 @@ export default function HomePage() {
   }
 
   function handleFurnitureSelect(type: FurnitureType) {
-    const scene = gameRef.current?.getScene();
-    if (!scene) return;
-    // Place at player's current position
-    const playerX = (scene as any).localPhysicsBody?.x ?? 400;
-    const playerY = (scene as any).localPhysicsBody?.y ?? 300;
-    addFurniture(type.id, playerX + 50, playerY);
+    const pos = localPositionRef.current;
+    const x = pos ? pos.x + 50 : 400;
+    const y = pos ? pos.y : 300;
+
+    addFurniture(type.id, x, y);
   }
 
   function handleRotateSelected() {
     if (!selectedFurnitureId) return;
+
     const item = furniture.find((f) => f.id === selectedFurnitureId);
     if (!item) return;
+
     rotateFurniture(selectedFurnitureId, (item.rotation + 90) % 360);
   }
 
   function handleDeleteSelected() {
     if (!selectedFurnitureId) return;
+
     deleteFurniture(selectedFurnitureId);
     setSelectedFurnitureId(null);
+
     const scene = gameRef.current?.getScene();
     scene?.clearFurnitureSelection();
   }
@@ -225,12 +277,28 @@ export default function HomePage() {
       : { label: '💕 Partner: Online', color: 'var(--success)' }
     : { label: '💤 Partner: Offline', color: 'var(--muted)' };
 
+  const partnerName =
+    partnerProfile?.display_name ??
+    remotePlayers.get(couple.partner_id ?? '')?.avatar?.name ??
+    'Partner';
+
+  const showCallPanel = Boolean(couple.partner_id) && (near || callState !== 'idle');
+
   return (
     <div style={{ width: '100vw', height: '100vh', position: 'relative', background: '#fff7f8' }}>
       <GameCanvas ref={gameRef} sceneConfig={sceneConfig} />
 
       {/* Top-right controls */}
-      <div style={{ position: 'absolute', top: '16px', right: '16px', zIndex: 1000, display: 'flex', gap: '8px' }}>
+      <div
+        style={{
+          position: 'absolute',
+          top: '16px',
+          right: '16px',
+          zIndex: 1000,
+          display: 'flex',
+          gap: '8px',
+        }}
+      >
         <button
           className="button secondary small"
           onClick={() => setShowCustomizer(true)}
@@ -316,6 +384,7 @@ export default function HomePage() {
           >
             🪑 Add Furniture
           </button>
+
           {selectedFurnitureId && (
             <>
               <button
@@ -345,11 +414,28 @@ export default function HomePage() {
         onToggleChat={() => setChatOpen((o) => !o)}
         onWave={sendWave}
         onOpenEmoji={() => setEmojiOpen(true)}
-        onToggleEdit={() => {
-          console.log('[HomePage] toggling edit mode');
-          setEditMode((e) => !e);
-        }}
+        onToggleEdit={() => setEditMode((e) => !e)}
       />
+
+            {/* Call panel */}
+      {showCallPanel && (
+        <CallPanel
+          callState={callState}
+          near={near}
+          supported={webrtcSupported}
+          partnerName={partnerName}
+          localStream={localStream}
+          remoteStream={remoteStream}
+          micEnabled={micEnabled}
+          cameraEnabled={cameraEnabled}
+          partnerSpeaking={partnerSpeaking}
+          localSpeaking={localSpeaking}
+          error={callError}
+          onToggleMic={toggleMic}
+          onToggleCamera={toggleCamera}
+          onEndCall={() => endCall(true)}
+        />
+      )}
 
       {/* Chat panel */}
       {chatOpen && (
