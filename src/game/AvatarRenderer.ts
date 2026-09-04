@@ -1,137 +1,89 @@
 import Phaser from 'phaser';
-import {
-  SKIN_COLORS,
-  HAIR_COLORS,
-  CLOTHES_COLORS,
-} from './types';
 import type { AvatarConfig } from './types';
+import type { CompassDirection } from './assets';
+
+// Every trimmed sprite (idle + walk) renders at this exact height.
+const AVATAR_HEIGHT = 48;
 
 export class AvatarRenderer {
   private scene: Phaser.Scene;
   private container: Phaser.GameObjects.Container;
+  private sprite: Phaser.GameObjects.Sprite | null = null;
+  private fallbackRect: Phaser.GameObjects.Rectangle | null = null;
+
+  private currentLook: string;
+  private facing: CompassDirection = 'south';
+  private lastMoveTime = 0;
 
   constructor(scene: Phaser.Scene, x: number, y: number, config: AvatarConfig) {
     this.scene = scene;
     this.container = scene.add.container(x, y);
-    this.build(config);
+    this.currentLook = config.look || 'boy';
+    this.build();
   }
 
-  private build(config: AvatarConfig) {
+  private build() {
     this.container.removeAll(true);
+    this.sprite = null;
+    this.fallbackRect = null;
 
-    const skinColor = SKIN_COLORS[config.skin];
-    const hairColor = HAIR_COLORS[config.hairColor];
-    const clothesColor = CLOTHES_COLORS[config.clothesColor];
-
-    // Body (clothes)
-    let body: Phaser.GameObjects.Rectangle;
-    if (config.clothes === 'dress') {
-      body = this.scene.add.rectangle(0, 8, 22, 22, clothesColor);
-    } else if (config.clothes === 'hoodie') {
-      body = this.scene.add.rectangle(0, 8, 24, 22, clothesColor);
+    const idleKey = `${this.currentLook}-idle-${this.facing}`;
+    if (this.scene.textures.exists(idleKey)) {
+      this.sprite = this.scene.add.sprite(0, 0, idleKey);
+      this.sprite.setOrigin(0.5, 1); // feet = bottom edge of the trimmed sprite
+      this.applySize(idleKey);
+      this.container.add(this.sprite);
     } else {
-      body = this.scene.add.rectangle(0, 8, 20, 20, clothesColor);
-    }
-    this.container.add(body);
-
-    // Head
-    const head = this.scene.add.circle(0, -10, 10, skinColor);
-    this.container.add(head);
-
-    // Hair
-    this.addHair(config.hair, hairColor);
-
-    // Accessory
-    this.addAccessory(config.accessory);
-  }
-
-  private addHair(style: AvatarConfig['hair'], color: number) {
-    switch (style) {
-      case 'short': {
-        const hair = this.scene.add.rectangle(0, -14, 18, 8, color);
-        this.container.add(hair);
-        break;
-      }
-      case 'long': {
-        const top = this.scene.add.rectangle(0, -14, 20, 8, color);
-        const left = this.scene.add.rectangle(-9, -4, 4, 16, color);
-        const right = this.scene.add.rectangle(9, -4, 4, 16, color);
-        this.container.add([top, left, right]);
-        break;
-      }
-      case 'curly': {
-        const c1 = this.scene.add.circle(-6, -14, 5, color);
-        const c2 = this.scene.add.circle(0, -16, 5, color);
-        const c3 = this.scene.add.circle(6, -14, 5, color);
-        this.container.add([c1, c2, c3]);
-        break;
-      }
-      case 'ponytail': {
-        const top = this.scene.add.rectangle(0, -14, 18, 8, color);
-        const tail = this.scene.add.rectangle(8, -4, 4, 14, color);
-        this.container.add([top, tail]);
-        break;
-      }
-      case 'bald':
-      default:
-        break;
+      this.fallbackRect = this.scene.add.rectangle(0, -24, 32, 48, 0xff8fab);
+      this.container.add(this.fallbackRect);
     }
   }
 
-  private addAccessory(accessory: AvatarConfig['accessory']) {
-    switch (accessory) {
-      case 'hat': {
-        const brim = this.scene.add.rectangle(0, -20, 24, 3, 0x4a3728);
-        const top = this.scene.add.rectangle(0, -26, 16, 8, 0x4a3728);
-        this.container.add([brim, top]);
-        break;
+  /** Scale so the trimmed character always renders at AVATAR_HEIGHT. */
+  private applySize(textureKey: string) {
+    if (!this.sprite || !this.scene.textures.exists(textureKey)) return;
+    const source = this.scene.textures.get(textureKey).source?.[0];
+    if (source && source.height > 0) {
+      this.sprite.setScale(AVATAR_HEIGHT / source.height);
+    }
+  }
+
+  updateState(direction: CompassDirection | 'idle', isMoving: boolean) {
+    if (direction !== 'idle') this.facing = direction;
+    if (isMoving) this.lastMoveTime = this.scene.time.now;
+    if (!this.sprite) return;
+
+    const walkKey = `${this.currentLook}-walk-${this.facing}`;
+    const idleKey = `${this.currentLook}-idle-${this.facing}`;
+    const hasWalk = this.scene.anims.exists(walkKey);
+    const inGrace = this.scene.time.now - this.lastMoveTime < 140; // finish the step smoothly
+
+    if (hasWalk && (isMoving || inGrace)) {
+      const alreadyPlaying =
+        this.sprite.anims.isPlaying && this.sprite.anims.currentAnim?.key === walkKey;
+      if (!alreadyPlaying) {
+        this.sprite.play(walkKey, true);
+        this.sprite.setY(0); // same ground line as idle
+        this.applySize(`${this.currentLook}-walk-${this.facing}-0`);
       }
-      case 'glasses': {
-        const left = this.scene.add.circle(-5, -10, 3, 0x333333);
-        const right = this.scene.add.circle(5, -10, 3, 0x333333);
-        const bridge = this.scene.add.rectangle(0, -10, 4, 1, 0x333333);
-        left.setFillStyle(0xffffff, 0.3);
-        right.setFillStyle(0xffffff, 0.3);
-        this.container.add([left, right, bridge]);
-        break;
-      }
-      case 'bow': {
-        const bow = this.scene.add.rectangle(0, -20, 10, 6, 0xff4d6d);
-        this.container.add(bow);
-        break;
-      }
-      case 'flower': {
-        const center = this.scene.add.circle(-8, -16, 3, 0xffeb3b);
-        const p1 = this.scene.add.circle(-11, -16, 2, 0xff8fab);
-        const p2 = this.scene.add.circle(-5, -16, 2, 0xff8fab);
-        const p3 = this.scene.add.circle(-8, -19, 2, 0xff8fab);
-        const p4 = this.scene.add.circle(-8, -13, 2, 0xff8fab);
-        this.container.add([center, p1, p2, p3, p4]);
-        break;
-      }
-      case 'none':
-      default:
-        break;
+    } else if (this.sprite.anims.isPlaying || this.sprite.texture.key !== idleKey) {
+      this.sprite.stop();
+      this.sprite.setTexture(idleKey);
+      this.sprite.setFrame(0);
+      this.sprite.setY(0);
+      this.applySize(idleKey);
     }
   }
 
   update(config: AvatarConfig) {
-    this.build(config);
+    if (config.look && config.look !== this.currentLook) {
+      this.currentLook = config.look;
+      this.build();
+    }
   }
 
-  setPosition(x: number, y: number) {
-    this.container.setPosition(x, y);
-  }
-
-  setDepth(depth: number) {
-    this.container.setDepth(depth);
-  }
-
-  destroy() {
-    this.container.destroy();
-  }
-
-  getContainer() {
-    return this.container;
-  }
+  setPosition(x: number, y: number) { this.container.setPosition(x, y); }
+  setDepth(depth: number) { this.container.setDepth(depth); }
+  destroy() { this.container.destroy(); }
+  getContainer() { return this.container; }
 }

@@ -1,5 +1,6 @@
 export interface AvatarConfig {
   name: string;
+  look: string;
   skin: 'light' | 'fair' | 'medium' | 'tan' | 'dark';
   hair: 'short' | 'long' | 'curly' | 'ponytail' | 'bald';
   hairColor: 'black' | 'brown' | 'blonde' | 'red' | 'gray' | 'pink';
@@ -10,6 +11,7 @@ export interface AvatarConfig {
 
 export const DEFAULT_AVATAR: AvatarConfig = {
   name: 'Partner',
+  look: 'boy',
   skin: 'fair',
   hair: 'short',
   hairColor: 'brown',

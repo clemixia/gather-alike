@@ -5,9 +5,12 @@ import type { AvatarConfig } from '../types';
 import { AvatarRenderer } from '../AvatarRenderer';
 import { DEFAULT_AVATAR } from '../types';
 import { getFurnitureType, type FurnitureInstance } from '../furniture';
+import { getHouseLayout, findFreeSpot, type HouseLayout } from '../layouts';
+import { preloadCharacterAssets, createCharacterAnimations, INPUT_TO_COMPASS, type CompassDirection } from '../assets';
 
 export interface MainSceneConfig {
   avatar?: AvatarConfig;
+  layout?: HouseLayout;
   onPositionUpdate?: (pos: Omit<PlayerPosition, 'userId'>) => void;
   onRoomChange?: (room: Room | null) => void;
   onReady?: () => void;
@@ -20,6 +23,7 @@ interface RemotePlayer {
   targetX: number;
   targetY: number;
   currentAvatar: AvatarConfig;
+  compass: CompassDirection; // Tracks which way the partner is facing for animations
 }
 
 export default class MainScene extends Phaser.Scene {
@@ -43,6 +47,10 @@ export default class MainScene extends Phaser.Scene {
   // World
   private walls!: Phaser.Physics.Arcade.StaticGroup;
   private currentRoom: Room | null = null;
+  private currentLayout: HouseLayout | null = null;
+  private currentRooms: Room[] = [];
+  private worldFloor: Phaser.GameObjects.Rectangle | null = null;
+  private worldRoomLabels: Phaser.GameObjects.Text[] = [];
 
   // Remote players
   private remotePlayers = new Map<string, RemotePlayer>();
@@ -77,12 +85,19 @@ export default class MainScene extends Phaser.Scene {
     super({ key: 'MainScene' });
   }
 
+  preload() {
+    preloadCharacterAssets(this);
+  }
+
   init(data: MainSceneConfig) {
     this.callbacksRef.onPositionUpdate = data.onPositionUpdate;
     this.callbacksRef.onRoomChange = data.onRoomChange;
     this.callbacksRef.onReady = data.onReady;
     this.callbacksRef.onFurnitureMove = data.onFurnitureMove;
     this.localAvatarConfig = data.avatar ?? DEFAULT_AVATAR;
+    
+    this.currentLayout = data.layout ?? getHouseLayout(null);
+    this.currentRooms = this.currentLayout.rooms;
   }
 
   public updateConfig(config: MainSceneConfig) {
@@ -90,6 +105,7 @@ export default class MainScene extends Phaser.Scene {
     this.callbacksRef.onRoomChange = config.onRoomChange;
     this.callbacksRef.onReady = config.onReady;
     this.callbacksRef.onFurnitureMove = config.onFurnitureMove;
+
     if (config.avatar) {
       this.localAvatarConfig = config.avatar;
       if (this.localAvatar) {
@@ -97,53 +113,40 @@ export default class MainScene extends Phaser.Scene {
         this.localNameText.setText(config.avatar.name);
       }
     }
+    
+    if (config.layout && config.layout.id !== this.currentLayout?.id) {
+      this.currentLayout = config.layout;
+      this.currentRooms = config.layout.rooms;
+      this.rebuildWorld();
+    }
   }
 
   create() {
-    // Floor
-    this.add.rectangle(400, 300, 800, 600, 0xf5e6d3);
+    createCharacterAnimations(this);
+    this.buildWorld();
 
-    // Room labels
-    this.add.text(150, 200, '🛏️', { fontSize: '32px' }).setOrigin(0.5).setAlpha(0.4);
-    this.add.text(550, 200, '🍳', { fontSize: '32px' }).setOrigin(0.5).setAlpha(0.4);
-    this.add.text(200, 500, '🛋️', { fontSize: '32px' }).setOrigin(0.5).setAlpha(0.4);
-    this.add.text(600, 500, '🍽️', { fontSize: '32px' }).setOrigin(0.5).setAlpha(0.4);
-
-    // Walls
-    const wallColor = 0x8b7355;
-    this.walls = this.physics.add.staticGroup();
-
-    const addWall = (x: number, y: number, w: number, h: number) => {
-      const wall = this.add.rectangle(x, y, w, h, wallColor);
-      this.walls.add(wall);
-    };
-
-    addWall(400, 50, 800, 20);
-    addWall(400, 550, 800, 20);
-    addWall(50, 300, 20, 600);
-    addWall(750, 300, 20, 600);
-    addWall(300, 200, 20, 200);
-    addWall(500, 400, 200, 20);
+    const spawnX = this.currentLayout?.spawn.x ?? 400;
+    const spawnY = this.currentLayout?.spawn.y ?? 300;
 
     // Local player avatar
-    this.localAvatar = new AvatarRenderer(this, 400, 300, this.localAvatarConfig);
+    this.localAvatar = new AvatarRenderer(this, spawnX, spawnY, this.localAvatarConfig);
     this.localNameText = this.add
-      .text(400, 272, this.localAvatarConfig.name, {
+      .text(spawnX, spawnY - 54, this.localAvatarConfig.name, { // -54 fits 48px sprites better
         fontSize: '12px',
         color: '#5b4650',
         fontStyle: 'bold',
       })
-      .setOrigin(0.5);
+      .setOrigin(0.5)
+      .setDepth(1000);
 
     // Physics body (invisible)
-    this.localPhysicsBody = this.add.rectangle(400, 300, 20, 20, 0x000000, 0);
+    this.localPhysicsBody = this.add.rectangle(spawnX, spawnY, 20, 20, 0x000000, 0);
     this.physics.world.enable(this.localPhysicsBody);
     (this.localPhysicsBody.body as Phaser.Physics.Arcade.Body).setCollideWorldBounds(true);
-
     this.physics.add.collider(this.localPhysicsBody, this.walls);
 
     // Camera
-    this.cameras.main.setBounds(0, 0, 800, 600);
+    this.applyWorldBounds();
     this.cameras.main.startFollow(this.localPhysicsBody, true, 0.1, 0.1);
 
     // Input
@@ -160,7 +163,6 @@ export default class MainScene extends Phaser.Scene {
     // Furniture drag handlers (scene-level)
     this.input.on('pointerdown', (pointer: Phaser.Input.Pointer) => {
       if (!this.editMode) return;
-
       const hitId = this.findFurnitureAt(pointer.worldX, pointer.worldY);
       if (hitId) {
         this.selectFurniture(hitId);
@@ -181,11 +183,12 @@ export default class MainScene extends Phaser.Scene {
       if (this.draggingFurniture) {
         const sprite = this.furnitureSprites.get(this.draggingFurniture.id);
         if (sprite) {
-          this.callbacksRef.onFurnitureMove?.(
-            this.draggingFurniture.id,
-            sprite.x,
-            sprite.y
-          );
+          const spot = this.resolveFurnitureDrop(sprite, sprite.x, sprite.y);
+          sprite.setPosition(spot.x, spot.y);
+          if (this.selectionIndicator) {
+            this.selectionIndicator.setPosition(spot.x, spot.y);
+          }
+          this.callbacksRef.onFurnitureMove?.(this.draggingFurniture.id, spot.x, spot.y);
         }
         this.draggingFurniture = null;
         this.rebuildFurnitureCollision();
@@ -199,6 +202,82 @@ export default class MainScene extends Phaser.Scene {
       this.callbacksRef.onReady?.();
       this.broadcastPosition(true);
     });
+  }
+
+  private buildWorld() {
+    const layout = this.currentLayout;
+    if (!layout) return;
+
+    if (this.worldFloor) {
+      this.worldFloor.destroy();
+    }
+    this.worldRoomLabels.forEach((label) => label.destroy());
+    this.worldRoomLabels = [];
+    if (this.walls) {
+      this.walls.clear(true, true);
+    } else {
+      this.walls = this.physics.add.staticGroup();
+    }
+
+    // Floor
+    this.worldFloor = this.add.rectangle(
+      layout.width / 2,
+      layout.height / 2,
+      layout.width,
+      layout.height,
+      layout.floorColor
+    );
+    this.worldFloor.setDepth(-10);
+
+    // Room emoji labels
+    for (const room of layout.rooms) {
+      if (room.emoji) {
+        const cx = room.bounds.x + room.bounds.width / 2;
+        const cy = room.bounds.y + room.bounds.height / 2;
+        const label = this.add
+          .text(cx, cy, room.emoji, { fontSize: '32px' })
+          .setOrigin(0.5)
+          .setAlpha(0.4)
+          .setDepth(-5);
+        this.worldRoomLabels.push(label);
+      }
+    }
+
+    // Walls
+    for (const wall of layout.walls) {
+      const wallRect = this.add.rectangle(wall.x, wall.y, wall.w, wall.h, layout.wallColor);
+      this.walls.add(wallRect);
+    }
+  }
+
+  private rebuildWorld() {
+    this.buildWorld();
+    this.applyWorldBounds();
+
+    if (this.localPhysicsBody && this.currentLayout) {
+      const clampedX = Phaser.Math.Clamp(this.localPhysicsBody.x, 30, this.currentLayout.width - 30);
+      const clampedY = Phaser.Math.Clamp(this.localPhysicsBody.y, 30, this.currentLayout.height - 30);
+      this.localPhysicsBody.setPosition(clampedX, clampedY);
+    }
+    this.rebuildFurnitureCollision();
+  }
+
+  private applyWorldBounds() {
+    const layout = this.currentLayout;
+    if (!layout) return;
+    this.physics.world.setBounds(0, 0, layout.width, layout.height);
+    this.cameras.main.setBounds(0, 0, layout.width, layout.height);
+  }
+
+  private resolveFurnitureDrop(
+    sprite: Phaser.GameObjects.Container,
+    x: number,
+    y: number
+  ): { x: number; y: number } {
+    if (!this.currentLayout) return { x, y };
+    const w = (sprite.getData('width') as number) ?? 32;
+    const h = (sprite.getData('height') as number) ?? 32;
+    return findFreeSpot(this.currentLayout, x, y, w, h);
   }
 
   update(_time: number, delta: number) {
@@ -234,11 +313,34 @@ export default class MainScene extends Phaser.Scene {
       vy = (vy / len) * this.speed;
     }
 
-    body.setVelocity(vx, vy);
+        // 🧈 Smooth acceleration / deceleration (glides instead of snapping)
+    const ease = Math.min(1, (delta / 1000) * 14);
+    body.setVelocity(
+      Phaser.Math.Linear(body.velocity.x, vx, ease),
+      Phaser.Math.Linear(body.velocity.y, vy, ease)
+    );
+
+    // Derive direction from ACTUAL velocity, so short taps glide naturally
+    const speed = Math.hypot(body.velocity.x, body.velocity.y);
+    if (speed > 12) {
+      if (Math.abs(body.velocity.x) > Math.abs(body.velocity.y)) {
+        this.currentDirection = body.velocity.x < 0 ? 'left' : 'right';
+      } else {
+        this.currentDirection = body.velocity.y < 0 ? 'up' : 'down';
+      }
+    } else if (speed < 2) {
+      this.currentDirection = 'idle';
+    }
+
+    // 🎬 Trigger local animations
+    this.localAvatar.updateState(
+      this.currentDirection === 'idle' ? 'idle' : INPUT_TO_COMPASS[this.currentDirection],
+      speed > 8
+    );
 
     // Sync avatar position with physics body
     this.localAvatar.setPosition(this.localPhysicsBody.x, this.localPhysicsBody.y);
-    this.localNameText.setPosition(this.localPhysicsBody.x, this.localPhysicsBody.y - 28);
+    this.localNameText.setPosition(this.localPhysicsBody.x, this.localPhysicsBody.y - 54);
 
     // Throttled broadcast
     const now = _time;
@@ -262,11 +364,12 @@ export default class MainScene extends Phaser.Scene {
         }
       } else if (!this.input.activePointer.isDown) {
         if (sprite) {
-          this.callbacksRef.onFurnitureMove?.(
-            this.draggingFurniture.id,
-            sprite.x,
-            sprite.y
-          );
+          const spot = this.resolveFurnitureDrop(sprite, sprite.x, sprite.y);
+          sprite.setPosition(spot.x, spot.y);
+          if (this.selectionIndicator) {
+            this.selectionIndicator.setPosition(spot.x, spot.y);
+          }
+          this.callbacksRef.onFurnitureMove?.(this.draggingFurniture.id, spot.x, spot.y);
         }
         this.draggingFurniture = null;
         this.rebuildFurnitureCollision();
@@ -275,13 +378,17 @@ export default class MainScene extends Phaser.Scene {
 
     this.updateRoom();
 
-        // Interpolate remote players
+    // Interpolate remote players
     this.remotePlayers.forEach((rp) => {
       const lerpFactor = Math.min(1, (delta / 100) * 0.6);
       const newX = rp.avatar.getContainer().x + (rp.targetX - rp.avatar.getContainer().x) * lerpFactor;
       const newY = rp.avatar.getContainer().y + (rp.targetY - rp.avatar.getContainer().y) * lerpFactor;
       rp.avatar.setPosition(newX, newY);
       rp.nameText?.setPosition(newX, newY - 28);
+      
+      // 🎬 Trigger remote animations (stops when they arrive)
+      const arrived = Math.hypot(rp.targetX - newX, rp.targetY - newY) < 1.5;
+      rp.avatar.updateState(arrived ? 'idle' : rp.compass, !arrived);
     });
 
     // Speaking indicator above partner avatar
@@ -326,7 +433,7 @@ export default class MainScene extends Phaser.Scene {
   }
 
   private updateRoom() {
-    const room = getRoomAtPosition(this.localPhysicsBody.x, this.localPhysicsBody.y);
+    const room = getRoomAtPosition(this.localPhysicsBody.x, this.localPhysicsBody.y, this.currentRooms);
     if (room?.id !== this.currentRoom?.id) {
       this.currentRoom = room;
       this.callbacksRef.onRoomChange?.(room);
@@ -345,18 +452,21 @@ export default class MainScene extends Phaser.Scene {
           color: '#5b4650',
           fontStyle: 'bold',
         })
-        .setOrigin(0.5);
+        .setOrigin(0.5)
+        .setDepth(1000);
       rp = {
         avatar,
         nameText,
         targetX: pos.x,
         targetY: pos.y,
         currentAvatar: pos.avatar ?? DEFAULT_AVATAR,
+        compass: pos.direction === 'idle' ? 'south' : INPUT_TO_COMPASS[pos.direction],
       };
       this.remotePlayers.set(userId, rp);
     } else {
       rp.targetX = pos.x;
       rp.targetY = pos.y;
+      if (pos.direction !== 'idle') rp.compass = INPUT_TO_COMPASS[pos.direction];
 
       if (pos.avatar && !avatarsEqual(pos.avatar, rp.currentAvatar)) {
         rp.avatar.update(pos.avatar);
@@ -366,7 +476,7 @@ export default class MainScene extends Phaser.Scene {
     }
   }
 
-    public removeRemotePlayer(userId: string) {
+  public removeRemotePlayer(userId: string) {
     const rp = this.remotePlayers.get(userId);
     if (rp) {
       rp.avatar.destroy();
@@ -380,7 +490,7 @@ export default class MainScene extends Phaser.Scene {
     }
   }
 
-    public clearRemotePlayers() {
+  public clearRemotePlayers() {
     this.remotePlayers.forEach((rp) => {
       rp.avatar.destroy();
       rp.nameText.destroy();
@@ -476,7 +586,6 @@ export default class MainScene extends Phaser.Scene {
   }
 
   public setFurniture(items: FurnitureInstance[]) {
-    // Remove sprites that no longer exist
     const currentIds = new Set(items.map((f) => f.id));
     for (const [id, sprite] of this.furnitureSprites.entries()) {
       if (!currentIds.has(id)) {
@@ -485,7 +594,6 @@ export default class MainScene extends Phaser.Scene {
       }
     }
 
-    // Add or update sprites
     for (const item of items) {
       let sprite = this.furnitureSprites.get(item.id);
       if (!sprite) {
@@ -496,7 +604,6 @@ export default class MainScene extends Phaser.Scene {
       }
     }
 
-    // Rebuild collision
     this.rebuildFurnitureCollision();
   }
 
@@ -520,12 +627,10 @@ export default class MainScene extends Phaser.Scene {
     container.setData('width', type.width);
     container.setData('height', type.height);
 
-    // Subtle shadow
     const shadow = this.add.rectangle(0, 2, type.width, type.height, 0x000000, 0.08);
     shadow.setStrokeStyle(1, 0x000000, 0.1);
     container.add(shadow);
 
-    // Emoji as primary visual
     const emojiSize = Math.min(type.width, type.height) * 1.2;
     const emoji = this.add.text(0, 0, type.emoji, {
       fontSize: `${emojiSize}px`,
@@ -540,9 +645,7 @@ export default class MainScene extends Phaser.Scene {
   }
 
   private updateFurnitureSprite(sprite: Phaser.GameObjects.Container, item: FurnitureInstance) {
-    // Don't update position if we're dragging this item
     if (this.draggingFurniture?.id === item.id) return;
-
     sprite.setPosition(item.x, item.y);
     sprite.setRotation((item.rotation * Math.PI) / 180);
   }
@@ -602,7 +705,7 @@ export default class MainScene extends Phaser.Scene {
     this.clearSelection();
   }
 
-    public setPartnerSpeaking(speaking: boolean) {
+  public setPartnerSpeaking(speaking: boolean) {
     this.partnerSpeaking = speaking;
 
     if (!speaking && this.speakingIndicator) {
@@ -612,12 +715,10 @@ export default class MainScene extends Phaser.Scene {
   }
 
   private rebuildFurnitureCollision() {
-    // Remove old furniture bodies
     if (this.furnitureCollider) {
       this.furnitureCollider.destroy();
     }
 
-    // Create new static group for furniture
     this.furnitureBodies = this.physics.add.staticGroup();
 
     for (const [id, sprite] of this.furnitureSprites.entries()) {
@@ -629,13 +730,13 @@ export default class MainScene extends Phaser.Scene {
       body.setData('furnitureId', id);
     }
 
-    // Add collider with player
     this.furnitureCollider = this.physics.add.collider(this.localPhysicsBody, this.furnitureBodies);
   }
 }
 
 function avatarsEqual(a: AvatarConfig, b: AvatarConfig): boolean {
   return (
+    a.look === b.look && // Added for Phase 11
     a.skin === b.skin &&
     a.hair === b.hair &&
     a.hairColor === b.hairColor &&
